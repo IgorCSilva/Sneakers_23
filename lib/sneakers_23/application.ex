@@ -13,6 +13,7 @@ defmodule Sneakers23.Application do
 
   def start(_type, _args) do
     children = [
+      {Phoenix.PubSub, name: Sneakers23.PubSub},
       Sneakers23.Repo,
       Sneakers23Web.Endpoint,
       Sneakers23.Inventory
