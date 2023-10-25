@@ -26,7 +26,8 @@ defmodule Sneakers23Web.ChannelCase do
   using do
     quote do
       # Import conveniences for testing with channels
-      use Phoenix.ChannelTest
+      import Phoenix.ChannelTest
+      import Sneakers23Web.ChannelCase
 
       # The default endpoint for testing
       @endpoint Sneakers23Web.Endpoint
