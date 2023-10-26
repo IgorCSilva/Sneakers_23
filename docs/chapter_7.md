@@ -485,3 +485,153 @@ iex(3)> Sneakers23.Inventory.mark_product_released!(2)
 ```
 
 You will see the size components appear without page refresh.
+
+## Update a Client with Real-Time Data
+Let's add the stock level change function to the ProductChannel module.
+
+- in lib/sneakers_23_web/channels/product_channel.ex:
+```elixir
+  def notify_item_stock_change(
+    previous_item: %{available_count: old},
+    current_item: %{available_count: new, id: id, product_id: p_id}
+  ) do
+    case {
+      ProductView.availability_to_level(old),
+      ProductView.availability_to_level(new)
+    } do
+      {same, same} when same != "out" ->
+        {:ok, :no_change}
+        
+      {_, new_level} ->
+        Endpoint.broadcast!("product:#{p_id}", "stock_change", %{
+          product_id: p_id,
+          item_id: id,
+          level: new_level
+        })
+        
+        {:ok, :broadcast}
+    end
+  end
+```
+
+Then, write a test.
+- in test/sneakers_23_web/channels/product_channel_test.exs:
+```elixir
+  describe "notify_item_stock_change/1" do
+    setup _ do
+      {inventory, _data} =
+        Test.Factory.InventoryFactory.complete_products()
+
+      [product = %{items: [item]}, _] =
+        CompleteProduct.get_complete_products(inventory)
+
+      topic = "product:#{product.id}"
+      Endpoint.subscribe(topic)
+
+      {:ok, %{product: product, item: item}}
+    end
+
+    test "the ame stock level doesn't broadcast an event", %{item: item} do
+      opts = [previous_item: item, current_item: item]
+      assert ProductChannel.notify_item_stock_change(opts) == {:ok, :no_change}
+
+      refute_broadcast "stock_change", _
+    end
+
+    test "a stock level change broadcasts an event", %{item: item, product: product} do
+      new_item = Map.put(item, :available_count, 0)
+      opts = [previous_item: item, current_item: new_item]
+      assert ProductChannel.notify_item_stock_change(opts) == {:ok, :broadcast}
+
+      payload = %{item_id: item.id, product_id: product.id, level: "out"}
+      assert_broadcast "stock_change", ^payload
+
+    end
+  end
+```
+
+Run the tests and all will pass.
+
+- in lib/sneakers_23_web.ex:
+```elixir
+
+  defdelegate notify_item_stock_change(opts), to: Sneakers23Web.ProductChannel
+```
+
+Now, the client needs to listen for the event stock_change.
+- in assets/js/app.js, at the bottom of setupProductChannel/1:
+```javascript
+  ...
+
+  productChannel.on('stock_change', ({product_id, item_id, level}) => {
+    dom.updateItemLevel(item_id, level)
+  })
+  ...
+```
+
+Change component's classes by level.
+- in assets/js/dom.js:
+```javascript
+function updateItemLevel(itemId, level) {
+  Array.from(document.querySelectorAll('.size-container__entry'))
+    .filter((el) => el.value == itemId)
+    .forEach((el) => {
+      removeStockLevelClasses(el)
+      el.classList.add(`size-container__entry--level-${level}`)
+      el.disabled = level === "out"
+    })
+}
+
+dom.updateItemLevel = updateItemLevel
+
+function removeStockLevelClasses(el) {
+  Array.from(el.classList)
+    .filter((s) => s.startsWith('size-container__entry--level-'))
+    .forEach((name) => el.classList.remove(name))
+}
+```
+
+Let's test it now, marking the first six items as out-of-stock.
+Run: `iex -S mix phx.server` (`nvm use v16.0.0 && iex -S mix phx.server`)
+```
+iex(1)> {:ok, products} = Sneakers23.Inventory.get_complete_products()
+iex(2)> %{items: items} = List.first(products)
+iex(3)> items |> Enum.take(6) |> Enum.each(fn item ->
+          out_item = Map.put(item, :available_count, 0)
+          opts = [previous_item: item, current_item: out_item]
+          Sneakers23Web.notify_item_stock_change(opts)
+        end)
+```
+
+Update the item_sold! function to use the notify_item_stock_change function.
+- in :
+```elixir
+  def item_sold!(id), do: item_sold!(id, [])
+
+  def item_sold!(item_id, opts) do
+    pid = Keyword.get(opts, :pid, __MODULE__)
+
+    avail = Store.fetch_availability_for_item(item_id)
+    {:ok, old_inv, inv} = Server.set_item_availability(pid, avail)
+    {:ok, old_item} = CompleteProduct.get_item_by_id(old_inv, item_id)
+    {:ok, item} = CompleteProduct.get_item_by_id(inv, item_id)
+
+    Sneakers23Web.notify_item_stock_change(previous_item: old_item, current_item: item)
+
+    :ok
+  end
+```
+
+Test now:
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+iex -S mix phx.server
+iex(1)> Sneakers23.Inventory.mark_product_released!(1)
+iex(2)> Sneakers23.Inventory.mark_product_released!(2)
+iex(3)> Sneakers23Mock.InventoryReducer.sell_random_until_gone!()
+```
+
+You will see the items on the page start to disappear.
+
+## Run Multiple Servers
