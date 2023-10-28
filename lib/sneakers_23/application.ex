@@ -16,7 +16,8 @@ defmodule Sneakers23.Application do
       {Phoenix.PubSub, name: Sneakers23.PubSub},
       Sneakers23.Repo,
       Sneakers23Web.Endpoint,
-      Sneakers23.Inventory
+      Sneakers23.Inventory,
+      Sneakers23.Replication
     ]
 
     opts = [strategy: :one_for_one, name: Sneakers23.Supervisor]

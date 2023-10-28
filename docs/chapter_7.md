@@ -635,3 +635,171 @@ iex(3)> Sneakers23Mock.InventoryReducer.sell_random_until_gone!()
 You will see the items on the page start to disappear.
 
 ## Run Multiple Servers
+
+We have a problem.
+Run:
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+iex --name app@127.0.0.1 -S mix phx.server
+```
+
+Open `http://localhost:4000`.
+
+In another shell, run:
+```
+iex --name back@127.0.0.1 -S mix
+iex(1)> Node.connect(:"app@127.0.0.1")
+iex(2)> Sneakers23.Inventory.mark_product_released!(1)
+```
+
+Everything looks good. But when you refresh the page, you back to a "comming soon" state. This is because there are two different Inventory.Server processes running, and only the "back" node received the update. The real-time message was broadcast because of Phoenix, but the underlying data was not updated in the Inventory.Server process. We can solve this problem by adding replication.
+
+### Add Replication of Inventory Events
+Phoenix PubSub can be used for more than Channel messages. At its core, it lets any process subscribe to a particular event type. You'll need to spin up a new GenServer to handle the events, as well as a context to dispatch the events.
+
+It's possible for nodes to become out of sync from this replicated approach. For non-critical data, the benefits of scalability are often worth the trade-off of potential data incorrectness. In Sneakers23, we never use the replicated data as a source of truth for important operations, such as the purchase process. Instead, we use the database to ensure that these operations are consistent.
+
+We'll first write the Genserver and then work our way up through the various layers.
+- in lib/sneakers_23/replication/server.ex:
+```elixir
+defmodule Sneakers23.Replication.Server do
+  use GenServer
+
+  alias Sneakers23.Inventory
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def init(_opts) do
+    Phoenix.PubSub.subscribe(Sneakers23.PubSub, "inventory_replication")
+    {:ok, nil}
+  end
+
+  def handle_info({:mark_product_released!, product_id}, state) do
+    Inventory.mark_product_released!(product_id, being_replicated?: true)
+    {:noreply, state}
+  end
+
+  def handle_info({:item_sold!, id}, state) do
+    Inventory.item_sold!(id, being_replicated?: true)
+    {:noreply, state}
+  end
+end
+```
+
+Our process subcribes to the "inventory_replication" event. Any message that is sent to this topic will be received by the process as messages.
+
+Now, define the Replication context.
+- in lib/sneakers_23/replication.ex:
+```elixir
+defmodule Sneakers23.Replication do
+  alias __MODULE__.{Server}
+
+  defdelegate child_spec(opts), to: Server
+
+  def mark_product_released!(product_id) do
+    broadcast!({:mark_product_released!, product_id})
+  end
+
+  def item_sold!(item_id) do
+    broadcast!({:item_sold!, item_id})
+  end
+
+  defp broadcast!(data) do
+    # Send message to all processes except the local process. In this case, only
+    # remote nodes will receive replication events.
+    Phoenix.PubSub.broadcast_from!(
+      Sneakers23.PubSub,
+      server_pid(),
+      "inventory_replication",
+      data
+    )
+  end
+
+  defp server_pid() do
+    Process.whereis(Server)
+  end
+end
+```
+
+Let's add this new GenServer to our Application module.
+- in lib/sneakers_23/application.ex:
+```elixir
+    children = [
+      {Phoenix.PubSub, name: Sneakers23.PubSub},
+      Sneakers23.Repo,
+      Sneakers23Web.Endpoint,
+      Sneakers23.Inventory,
+      Sneakers23.Replication
+    ]
+```
+
+Now, we need to put them to use in the Inventory context functions.
+- in lib/sneakers_23/inventory.ex:
+```elixir
+
+  alias Sneakers23.Replication
+
+  def mark_product_released!(id), do: mark_product_released!(id, [])
+
+  def mark_product_released!(product_id, opts) do
+    pid = Keyword.get(opts, :pid, __MODULE__)
+    being_replicated? = Keyword.get(opts, :being_replicated?, false)
+
+    %{id: id} = Store.mark_product_released!(product_id)
+    {:ok, inventory} = Server.mark_product_released!(pid, id)
+    
+    unless being_replicated? do
+      Replication.mark_product_released!(product_id)
+      {:ok, product} = CompleteProduct.get_product_by_id(inventory, id)
+      Sneakers23Web.notify_product_released(product)
+    end
+
+    :ok
+  end
+
+  def item_sold!(id), do: item_sold!(id, [])
+
+  def item_sold!(item_id, opts) do
+    pid = Keyword.get(opts, :pid, __MODULE__)
+    being_replicated? = Keyword.get(opts, :being_replicated?, false)
+
+    avail = Store.fetch_availability_for_item(item_id)
+    {:ok, old_inv, inv} = Server.set_item_availability(pid, avail)
+    
+    unless being_replicated? do
+      Replication.item_sold!(item_id)
+      {:ok, old_item} = CompleteProduct.get_item_by_id(old_inv, item_id)
+      {:ok, item} = CompleteProduct.get_item_by_id(inv, item_id)
+      
+      Sneakers23Web.notify_item_stock_change(previous_item: old_item, current_item: item)
+    end
+
+    :ok
+  end
+```
+
+At this moment, we have a completely connected replicated system.
+We can replicate the previous test that not worked to see if it is all right now.
+
+Run:
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+iex --name app@127.0.0.1 -S mix phx.server
+```
+
+Open `http://localhost:4000` and see the modifications after each command.
+
+In another shell, run:
+```
+iex --name back@127.0.0.1 -S mix
+iex(1)> Node.connect(:"app@127.0.0.1")
+iex(2)> Sneakers23.Inventory.mark_product_released!(1)
+iex(3)> Sneakers23.Inventory.mark_product_released!(2)
+iex(4)> Sneakers23Mock.InventoryReducer.sell_random_until_gone!()
+```
+
+After refresh page, all needs to be equal before refresh.
