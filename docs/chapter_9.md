@@ -165,3 +165,241 @@ and visit `http://localhost:4000`. Open the console tab, type `window.cartId` an
 If you refresh or open multipe tabs, you will always see the same ID. If you open your browser incognito, you'll see a different ID.
 
 ## Build Your Shopping Cart Channel
+Channels are just processes. Each ShoppingCartChannel represents one open instance of Sneakers23.
+
+### Create the Channel
+- in lib/sneakers_23_web/channels/product_socket.ex:
+```elixir
+...
+  channel "cart:*", Sneakers23Web.ShoppingCartChannel
+
+...
+```
+
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+defmodule Sneakers23Web.ShoppingCartChannel do
+  use Phoenix.Channel
+
+  alias Sneakers23.Checkout
+
+  def join("cart:" <> id, params, socket) when byte_size(id) == 64 do
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+
+    {:ok, socket}
+  end
+
+  defp get_cart(params) do
+    params
+    |> Map.get("serialized", nil)
+    |> Checkout.restore_cart()
+  end
+end
+```
+
+Now, we need to render the cart to a map that can be sent to the client.
+- in lib/sneakers_23_web/views/cart_view.ex:
+```elixir
+defmodule Sneakers23Web.CartView do
+
+  def cart_to_map(cart) do
+    {:ok, serialized} = Sneakers23.Checkout.export_cart(cart)
+
+    {:ok, products} = Sneakers23.Inventory.get_complete_products()
+    item_ids = Sneakers23.Checkout.cart_item_ids(cart)
+    items = render_items(products, item_ids)
+
+    %{items: items, serialized: serialized}
+  end
+
+  defp render_items(_, []), do: []
+  defp render_items(products, item_ids) do
+    for product <- products,
+        item <- product.items,
+        item.id in item_ids do
+      render_item(product, item)
+    end
+    |> Enum.sort_by(& &1.id)
+  end
+
+  @product_attrs [
+    :brand, :color, :name, :price_usd, :main_image_url, :released
+  ]
+
+  @item_attrs [:id, :size, :sku]
+
+  defp render_item(product, item) do
+    product_attributes = Map.take(product, @product_attrs)
+    item_attributes = Map.take(item, @item_attrs)
+
+    product_attributes
+    |> Map.merge(item_attributes)
+    |> Map.put(:out_of_stock, item.available_count == 0)
+  end
+end
+```
+
+Next, let's change the ShoppingCartChannel to use the cart_to_map/1 function. We'll push the cart to the client when a client joins.
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+  import Sneakers23Web.CartView, only: [cart_to_map: 1]
+
+  def join("cart:" <> id, params, socket) when byte_size(id) == 64 do
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+    send(self(), :send_cart)
+
+    {:ok, socket}
+  end
+
+  ...
+
+  def handle_info(:send_cart, socket = %{assigns: %{cart: cart}}) do
+    push(socket, "cart", cart_to_map(cart))
+    {:noreply, socket}
+  end
+```
+
+Now, connect the front end to the Channel. Replace the code above the function `setupProductChannel` with the code below.
+- in assets/js/app.js:
+```javascript
+import css from "../css/app.css"
+import { productSocket } from "./socket"
+import dom from "./dom"
+import Cart from './cart'
+
+productSocket.connect()
+
+const productIds = dom.getProductIds()
+
+productIds.forEach((id) => setupProductChannel(productSocket, id))
+
+const cartChannel = Cart.setupCartChannel(productSocket, window.cartId, {
+  onCartChange: (newCart) => {
+    dom.renderCartHtml(newCart)
+  }
+})
+```
+
+Update `dom.js`.
+- in assets/js/dom.js:
+```javascript
+import { getCartHtml } from './cartRenderer'
+
+dom.renderCartHtml = (cart) => {
+  const cartContainer = document.getElementById("cart-container")
+  cartContainer.innerHTML = getCartHtml(cart)
+}
+```
+
+- in assets/js/cart.js:
+```javascript
+const Cart = {}
+export default Cart
+
+Cart.setupCartChannel = (socket, cartId, { onCartChange }) => {
+  const cartChannel = socket.channel(`cart:${cartId}`, channelParams)
+  const onCartChangeFn = (cart) => {
+    console.debug("Cart received", cart)
+    localStorage.storedCart = cart.serialized
+    onCartChange(cart)
+  }
+
+  cartChannel.on("cart", onCartChangeFn)
+  cartChannel.join().receive("error", () => {
+    console.error("Cart join failed")
+  })
+
+  return {
+    cartChannel,
+    onCartChange: onCartChangeFn
+  }
+}
+
+function channelParams() {
+  return {
+    serialized: localStorage.storedCart
+  }
+}
+```
+
+Finally, start the server.
+`mix phx.server`
+
+visit `http://localhost:4000`.
+In console tab, you will see something like this:
+`Cart received {items: [], serialized: "AdfowkAsi.eaq...93ks"}`
+
+### Add and Remove Items to Your Cart
+
+Add this function after the call to Cart.setupCartChannel.
+- in assets/js/app.js:
+```javascript
+dom.onItemClick((itemId) => {
+  Cart.addCartItem(cartChannel, itemId)
+})
+```
+
+- in assets/js/dom.js:
+```javascript
+dom.onItemClick = (fn) => {
+  document.addEventListener('click', (event) => {
+    if (!event.target.matches('.size-container__entry')) { return }
+    event.preventDefault()
+
+    fn(event.target.value)
+  })
+}
+```
+
+- in assets/js/cart.js:
+```javascript
+Cart.addCartItem = ({ cartChannel, onCartChange }, itemId) => {
+  cartRequest(cartChannel, 'add_item', { item_id: itemId }, (resp) => {
+    onCartChange(resp)
+  })
+}
+
+Cart.removeCartItem = ({ cartChannel, onCartChange }, itemId) => {
+  cartRequest(cartChannel, 'remove_item', { item_id: itemId }, (resp) => {
+    onCartChange(resp)
+  })
+}
+
+function cartRequest(cartChannel, event, payload, onSuccess) {
+  cartChannel.push(event, payload)
+    .receive('ok', onSuccess)
+    .receive('error', (resp) => console.error('Cart error', event, resp))
+    .receive('timeout', () => console.error('Cart timeout', event))
+}
+```
+
+Now add the event handler in back end.
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+  def handle_in("add_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
+    case Checkout.add_item_to_cart(cart, String.to_integer(id)) do
+      {:ok, new_cart} ->
+        socket = assign(socket, :cart, new_cart)
+        {:reply, {:ok, cart_to_map(new_cart)}, socket}
+
+      {:error, :duplicate_item} ->
+        {:reply, {:error, %{error: "duplicate_item"}}, socket}
+
+    end
+  end
+```
+
+Let's try all now.
+`mix ecto.reset`
+`mix run -e "Sneakers23Mock.Seeds.seed!()"`
+`iex -S mix phx.server`
+`iex(2)> Enum.each([1, 2], &Sneakers23.Inventory.mark_product_released!/1)`
+
+Open `http://localhost:4000` and the console tab.
+Click on one of the available shoe size. You will see a new cart appear with some informations.
+
+Open a second tab and navigate to `http://localhost:4000`. You will see the same. If you add another item, the tabs will be out of sync, but in sync after refresh. Then we need to synchronize clients across multiple instances of the cart.
+
+### Synchronize Multiple Channels Clients
