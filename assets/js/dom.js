@@ -54,4 +54,13 @@ dom.onItemClick = (fn) => {
   })
 }
 
+dom.onItemRemoveClick = (fn) => {
+  document.addEventListener('click', (event) => {
+    if (!event.target.matches('.cart-item__remove')) { return }
+    event.preventDefault()
+
+    fn(event.target.dataset.itemId)
+  })
+}
+
 export default dom

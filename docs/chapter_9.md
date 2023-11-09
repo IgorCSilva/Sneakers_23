@@ -403,3 +403,89 @@ Click on one of the available shoe size. You will see a new cart appear with som
 Open a second tab and navigate to `http://localhost:4000`. You will see the same. If you add another item, the tabs will be out of sync, but in sync after refresh. Then we need to synchronize clients across multiple instances of the cart.
 
 ### Synchronize Multiple Channels Clients
+
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+  def handle_in("add_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
+    case Checkout.add_item_to_cart(cart, String.to_integer(id)) do
+      {:ok, new_cart} ->
+ > > >  broadcast_cart(new_cart, socket, added: [id])
+        socket = assign(socket, :cart, new_cart)
+        {:reply, {:ok, cart_to_map(new_cart)}, socket}
+
+      {:error, :duplicate_item} ->
+        {:reply, {:error, %{error: "duplicate_item"}}, socket}
+    end
+  end
+
+  def handle_out("cart_updated", params, socket) do
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+    push(socket, "cart", cart_to_map(cart))
+
+    {:noreply, socket}
+  end
+
+  defp broadcast_cart(cart, socket, opts) do
+    {:ok, serialized} = Checkout.export_cart(cart)
+
+    broadcast_from(socket, "cart_updated", %{
+      "serialized" => serialized,
+      "added" => Keyword.get(opts, :added, []),
+      "removed" => Keyword.get(opts, :removed, [])
+    })
+  end
+```
+
+The function broadcast_from/3 differs from the function broadcast/3 because the calling process will not receive the message. Only other processes - other ShoppingCartChannels with the same cart ID - will receive the message. This way, the other processes will save data in their channel's states.
+
+Let's try again:
+`mix ecto.reset`
+`mix run -e "Sneakers23Mock.Seeds.seed!()"`
+`iex -S mix phx.server`
+`iex(2)> Enum.each([1, 2], &Sneakers23.Inventory.mark_product_released!/1)`
+
+Open `http://localhost:4000` and the console tab.
+Click on one of the available shoe size. You will see a new cart appear with some informations.
+
+Open a second tab and navigate to `http://localhost:4000`. You will see the same. If you add another item, the tabs will be synchronized.
+
+Now, add remove item behaviour.
+
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+  def handle_in("remove_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
+    case Checkout.remove_item_from_cart(cart, String.to_integer(id)) do
+      {:ok, new_cart} ->
+        broadcast_cart(new_cart, socket, removed: [id])
+        socket = assign(socket, :cart, new_cart)
+        {:reply, {:ok, cart_to_map(new_cart)}, socket}
+
+      {:error, :not_found} ->
+        {:reply, {:error, %{error: "not_found"}}, socket}
+    end
+  end
+```
+
+- in assets/js/app.js:
+```javascript
+  dom.onItemRemoveClick((itemId) => {
+    Cart.removeCartItem(cartChannel, itemId)
+  })
+```
+
+- in assets/js/dom.js:
+```javascript
+dom.onItemRemoveClick = (fn) => {
+  document.addEventListener('click', (event) => {
+    if (!event.target.matches('.cart-item__remove')) { return }
+    event.preventDefault()
+
+    fn(event.target.dataset.itemId)
+  })
+}
+```
+
+Now you can test adding and removing items from the cart, even with multiple tabs opened.
+
+## Add Real-Time Out-Of-Stock Alerts
