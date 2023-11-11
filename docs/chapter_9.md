@@ -489,3 +489,185 @@ dom.onItemRemoveClick = (fn) => {
 Now you can test adding and removing items from the cart, even with multiple tabs opened.
 
 ## Add Real-Time Out-Of-Stock Alerts
+
+### PubSub in the Shopping Cart Channel
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+
+  def join("cart:" <> id, params, socket) when byte_size(id) == 64 do
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+    send(self(), :send_cart)
+>>> enqueue_cart_subscriptions(cart)
+
+    {:ok, socket}
+  end
+
+  def handle_in("add_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
+    case Checkout.add_item_to_cart(cart, String.to_integer(id)) do
+      {:ok, new_cart} ->
+>>>     send(self(), {:subscribe, id})
+        broadcast_cart(new_cart, socket, added: [id])
+        socket = assign(socket, :cart, new_cart)
+        {:reply, {:ok, cart_to_map(new_cart)}, socket}
+
+      {:error, :duplicate_item} ->
+        {:reply, {:error, %{error: "duplicate_item"}}, socket}
+    end
+  end
+
+  def handle_in("remove_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
+    case Checkout.remove_item_from_cart(cart, String.to_integer(id)) do
+      {:ok, new_cart} ->
+>>>     send(self(), {:unsubscribe, id})
+        broadcast_cart(new_cart, socket, removed: [id])
+        socket = assign(socket, :cart, new_cart)
+        {:reply, {:ok, cart_to_map(new_cart)}, socket}
+
+      {:error, :not_found} ->
+        {:reply, {:error, %{error: "not_found"}}, socket}
+    end
+  end
+
+  def handle_out("cart_updated", params, socket) do
+>>> modify_subscriptions(params)
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+    push(socket, "cart", cart_to_map(cart))
+
+    {:noreply, socket}
+  end
+
+  defp modify_subscriptions(%{"added" => add, "removed" => remove}) do
+    Enum.each(add, & send(self(), {:subscribe, &1}))
+    Enum.each(remove, & send(self(), {:unsubscribe, &1}))
+  end
+
+  def handle_info({:subscribe, item_id}, socket) do
+    Phoenix.PubSub.subscribe(Sneakers23.PubSub, "item_out:#{item_id}")
+    {:noreply, socket}
+  end
+
+  defp enqueue_cart_subscriptions(cart) do
+    cart
+    |> Checkout.cart_item_ids()
+    |> Enum.each(fn id ->
+      send(self(), {:subscribe, id})
+    end)
+  end
+
+  def handle_info({:item_out, id}, socket = %{assigns: %{cart: cart}}) do
+    push(socket, "cart", cart_to_map(cart))
+    {:noreply, socket}
+  end
+```
+
+- in lib/sneakers_23_web.ex:
+```elixir
+  def notify_local_item_stock_change(%{available_count: 0, id: id}) do
+    Sneakers23.PubSub
+    |> Phoenix.PubSub.node_name()
+    |> Phoenix.PubSub.direct_broadcast(
+      Sneakers23.PubSub, "item_out:#{id}", {:item_out, id}
+    )
+  end
+
+  def notify_local_item_stock_change(_), do: false
+```
+
+local_broadcast function works almost this same way, but is more performant.
+direct_broadcast sends out a broadcast. The broadcast will only be run on the specified node, which is the same one that called the initial function. If we broadcast the message to al nodes, then we would have a race condition and the CartView could potentiall render an out-of-stock item as available.
+
+Modify the item_sold! function to this.
+- in lib/sneakers_23/inventory.ex:
+```elixir
+  def item_sold!(id), do: item_sold!(id, [])
+
+  def item_sold!(item_id, opts) do
+    pid = Keyword.get(opts, :pid, __MODULE__)
+    being_replicated? = Keyword.get(opts, :being_replicated?, false)
+
+    avail = Store.fetch_availability_for_item(item_id)
+    {:ok, old_inv, inv} = Server.set_item_availability(pid, avail)
+    {:ok, item} = CompleteProduct.get_item_by_id(inv, item_id)
+
+    unless being_replicated? do
+      Replication.item_sold!(item_id)
+      {:ok, old_item} = CompleteProduct.get_item_by_id(old_inv, item_id)
+
+      Sneakers23Web.notify_item_stock_change(previous_item: old_item, current_item: item)
+    end
+    
+    Sneakers23Web.notify_local_item_stock_change(item)
+
+    :ok
+  end
+```
+
+### Complete the Checkout Process
+Copy and paste the following files to this project.
+- sneakers_23_cart/lib/sneakers_23_web/controllers/checkout_controller.ex
+- sneakers_23_cart/lib/sneakers_23_web/templates/checkout
+- sneakers_23_cart/lib/sneakers_23_web/views/checkout_view.ex
+
+Next, add the router entries to you Router module.
+- in :
+```elixir
+
+  get "/checkout", CheckoutController, :show
+  post "/checkout", CheckoutController, :purchase
+  get "/checkout/complete", CheckoutController, :success
+```
+
+- in lib/sneakers_23/checkout.ex:
+```elixir
+  def purchase_cart(cart, opts \\ []) do
+    Sneakers23.Repo.transaction(fn ->
+      Enum.each(cart_item_ids(cart), fn id ->
+        case Sneakers23.Checkout.SingleItem.sell_item(id, opts) do
+          :ok -> :ok
+          
+          _ -> Sneakers23.Repo.rollback(:purchase_failed)
+            
+        end
+      end)
+      
+      :purchase_complete
+    end)
+  end
+```
+
+## Acceptance Test the Shopping Cart
+
+### First Scenario
+Let's test now.
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+
+iex -S mix phx.server
+
+iex(1)> Enum.each([1, 2], &Sneakers23.Inventory.mark_product_released!/1)
+```
+
+Now, follow the acceptance test steps from 4 to 12.
+
+### Second Scenario
+Now test with multiple servers.
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+
+iex --name app@127.0.0.1 -S mix phx.server
+# Do not run commands from the "app" server.
+
+iex --name backend@127.0.0.1 -S mix
+iex(1)> Node.connect(:"app@127.0.0.1")
+
+iex(2)> Enum.each([1, 2], &Sneakers23.Inventory.mark_product_released!/1)
+
+# Follow steps 4-6
+iex(3)> Sneakers23Mock.InventoryReducer.sell_random_until_gone!()
+
+# Follow steps 8+
+```

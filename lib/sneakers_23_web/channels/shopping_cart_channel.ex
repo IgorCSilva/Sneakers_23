@@ -11,6 +11,7 @@ defmodule Sneakers23Web.ShoppingCartChannel do
     cart = get_cart(params)
     socket = assign(socket, :cart, cart)
     send(self(), :send_cart)
+    enqueue_cart_subscriptions(cart)
 
     {:ok, socket}
   end
@@ -29,6 +30,7 @@ defmodule Sneakers23Web.ShoppingCartChannel do
   def handle_in("add_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
     case Checkout.add_item_to_cart(cart, String.to_integer(id)) do
       {:ok, new_cart} ->
+        send(self(), {:subscribe, id})
         broadcast_cart(new_cart, socket, added: [id])
         socket = assign(socket, :cart, new_cart)
         {:reply, {:ok, cart_to_map(new_cart)}, socket}
@@ -41,6 +43,7 @@ defmodule Sneakers23Web.ShoppingCartChannel do
   def handle_in("remove_item", %{"item_id" => id}, socket = %{assigns: %{cart: cart}}) do
     case Checkout.remove_item_from_cart(cart, String.to_integer(id)) do
       {:ok, new_cart} ->
+        send(self(), {:unsubscribe, id})
         broadcast_cart(new_cart, socket, removed: [id])
         socket = assign(socket, :cart, new_cart)
         {:reply, {:ok, cart_to_map(new_cart)}, socket}
@@ -51,11 +54,17 @@ defmodule Sneakers23Web.ShoppingCartChannel do
   end
 
   def handle_out("cart_updated", params, socket) do
+    modify_subscriptions(params)
     cart = get_cart(params)
     socket = assign(socket, :cart, cart)
     push(socket, "cart", cart_to_map(cart))
 
     {:noreply, socket}
+  end
+
+  defp modify_subscriptions(%{"added" => add, "removed" => remove}) do
+    Enum.each(add, & send(self(), {:subscribe, &1}))
+    Enum.each(remove, & send(self(), {:unsubscribe, &1}))
   end
 
   defp broadcast_cart(cart, socket, opts) do
@@ -66,5 +75,28 @@ defmodule Sneakers23Web.ShoppingCartChannel do
       "added" => Keyword.get(opts, :added, []),
       "removed" => Keyword.get(opts, :removed, [])
     })
+  end
+
+  def handle_info({:subscribe, item_id}, socket) do
+    Phoenix.PubSub.subscribe(Sneakers23.PubSub, "item_out:#{item_id}")
+    {:noreply, socket}
+  end
+
+  defp enqueue_cart_subscriptions(cart) do
+    cart
+    |> Checkout.cart_item_ids()
+    |> Enum.each(fn id ->
+      send(self(), {:subscribe, id})
+    end)
+  end
+
+  def handle_info({:unsubscribe, item_id}, socket) do
+    Phoenix.PubSub.unsubscribe(Sneakers23.PubSub, "item_out:#{item_id}")
+    {:noreply, socket}
+  end
+
+  def handle_info({:item_out, id}, socket = %{assigns: %{cart: cart}}) do
+    push(socket, "cart", cart_to_map(cart))
+    {:noreply, socket}
   end
 end
