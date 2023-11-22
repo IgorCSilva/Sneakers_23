@@ -104,3 +104,120 @@ end
 ```
 
 Start your server with `mix phx.server` and visit `http://localhost:4000/admin`.
+
+Now set socket to use Presence.
+
+- in lib/sneakers_23_web/endpoint.ex:
+```elixir
+  socket "/admin_socket", Sneakers23Web.Admin.Socket,
+    websocket: true,
+    longpoll: false
+```
+
+- in lib/sneakers_23_web/channels/admin/socket.ex:
+```elixir
+defmodule Sneakers23Web.Admin.Socket do
+  use Phoenix.Socket
+  require Logger
+
+  ## Channels.
+  channel "admin:cart_tracker", Sneakers23Web.Admin.DashboardChannel
+
+  def connect(%{"token" => token}, socket) do
+    case verify(socket, token) do
+      {:ok, _} ->
+        {:ok, socket}
+
+      {:error, err} ->
+        Logger.error("#{__MODULE__} connect error #{inspect(err)}")
+        :error
+    end
+  end
+
+  def connect(_, _) do
+    Logger.error("#{__MODULE__} connect error missing params")
+    :error
+  end
+
+  def id(_socket), do: nil
+
+  @one_day 86400
+
+  defp verify(socket, token) do
+    Phoenix.Token.verify(
+      socket,
+      "admin socket",
+      token,
+      max_age: @one_day
+    )
+  end
+end
+```
+
+- in lib/sneakers_23_web/channels/admin/dashboard_channel.ex:
+```elixir
+defmodule Sneakers23Web.Admin.DashboardChannel do
+  use Phoenix.Channel
+
+  def join("admin:cart_tracker", _payload, socket) do
+    {:ok, socket}
+  end
+end
+```
+
+Now, make the following changes in entry, output and plugins fields.
+- in assets/webpack.config.js:
+```javascript
+{
+  ...
+
+  entry: {
+    './app': glob.sync('./vendor/**/*.js').concat(['./js/app.js']),
+    './admin': glob.sync('./vendor/**/*.js').concat(['./js/admin.js'])
+  },
+  output: {
+    filename: '[name].js',
+    path: path.resolve(__dirname, '../priv/static/js')
+  },
+  plugins: [
+    new MiniCssExtractPlugin({ filename: '../css/[name].css' }),
+    new CopyWebpackPlugin([{ from: 'static/', to: '../' }])
+  ]
+}
+```
+
+- in assets/js/admin.js:
+```javascript
+import { Presence } from 'phoenix'
+import adminCss from '../css/admin.css'
+import css from '../css/app.css'
+import { adminSocket } from './admin/socket'
+import dom from './admin/dom'
+
+adminSocket.connect()
+
+const cartTracker = adminSocket.channel('admin:cart_tracker')
+const presence = new Presence(cartTracker)
+window.presence = presence
+
+cartTracker.join()
+  .receive("error", () => {
+    console.error('Channel join failed')
+  })
+```
+
+- in assets/js/admin/socket.js:
+```javascript
+import { Socket } from 'phoenix'
+
+export const adminSocket = new Socket('/admin_socket', {
+  params: { token: window.adminToken }
+})
+```
+
+That completes the final step of our scaffolding.
+Test starting the server and accessing the dev tools to verify that /admin_socket/websocket is running and that the "admin:cart_tracker" topic has been joined.
+
+`mix phx.server` and access `http://localhost:4000/admin`
+
+## Track Shopping Carts in Real-Time
