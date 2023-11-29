@@ -221,3 +221,150 @@ Test starting the server and accessing the dev tools to verify that /admin_socke
 `mix phx.server` and access `http://localhost:4000/admin`
 
 ## Track Shopping Carts in Real-Time
+
+Create a CartTracker module.
+- in lib/sneakers_23_web/channels/cart_tracker.ex:
+```elixir
+defmodule Sneakers23Web.CartTracker do
+  use Phoenix.Presence, otp_app: :sneakers_23,
+                        pubsub_server: Sneakers23.PubSub
+
+  @topic "admin:cart_tracker"
+
+  # Function to track cart.
+  def track_cart(socket, %{cart: cart, id: id, page: page}) do
+    track(socket.channel_pid, @topic, id, %{
+      page_loaded_at: System.system_time(:millisecond),
+      page: page,
+      items: Sneakers23.Checkout.cart_item_ids(cart)
+    })
+  end
+
+  def update_cart(socket, %{cart: cart, id: id}) do
+    update(socket.channel_pid, @topic, id, fn existing_meta ->
+      Map.put(
+        existing_meta,
+        :items,
+        Sneakers23.Checkout.cart_item_ids(cart)
+      )
+    end)
+  end
+
+  # Returns all data currently tracked.
+  def all_carts(), do: list(@topic)
+end
+```
+
+That wraps up our CartTracker.
+
+We need to start the Presence process when our application boots.
+- in lib/sneakers_23/application.ex:
+```elixir
+    ...
+    Sneakers23Web.Endpoint,
+    {Sneakers23Web.CartTracker, [pool_size: :erlang.system_info(:schedulers_online)]},
+    ...
+```
+
+We will need to track the Channel when it joins.
+- in lib/sneakers_23_web/channels/shopping_cart_channel.ex:
+```elixir
+  def join("cart:" <> id, params, socket) when byte_size(id) == 64 do
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+    send(self(), :send_cart)
+    enqueue_cart_subscriptions(cart)
+    
+>>  socket =
+>>    socket
+>>    |> assign(:cart_id, id)
+>>    |> assign(:page, Map.get(params, "page", nil))
+>>    
+>>  send(self(), :after_join)
+
+    {:ok, socket}
+  end
+  
+  def handle_info(:after_join, socket = %{
+    assigns: %{cart: cart, cart_id: id, page: page}
+  }) do
+    {:ok, _} = Sneakers23Web.CartTracker.track_cart(
+      socket, %{cart: cart, id: id, page: page}
+    )
+    {:noreply, socket}
+  end
+  
+  def handle_info(:update_tracked_cart, socket = %{
+    assigns: %{cart: cart, id: id}
+  }) do
+    {:ok, _} = Sneakers23Web.CartTracker.update_cart(
+      socket, %{cart: cart, id: id}
+    )
+    {:noreply, socket}
+  end
+
+  def handle_out("cart_updated", params, socket) do
+    modify_subscriptions(params)
+    cart = get_cart(params)
+    socket = assign(socket, :cart, cart)
+    push(socket, "cart", cart_to_map(cart))
+>>  send(self(), :update_tracked_cart)
+
+    {:noreply, socket}
+  end
+
+  defp broadcast_cart(cart, socket, opts) do
+>>  send(self(), :update_tracked_cart)
+    {:ok, serialized} = Checkout.export_cart(cart)
+
+    broadcast_from(socket, "cart_updated", %{
+      "serialized" => serialized,
+      "added" => Keyword.get(opts, :added, []),
+      "removed" => Keyword.get(opts, :removed, [])
+    })
+  end
+```
+
+Presence works by sending an initial state to a client and keeping that state up to date by pushing changes.
+
+- in lib/sneakers_23_web/channels/admin/dashboard_channel.ex:
+```elixir
+  def join("admin:cart_tracker", _payload, socket) do
+    send(self(), :after_join)
+    {:ok, socket}
+  end
+  
+  def handle_info(:after_join, socket) do
+    push(socket, "presence_state", Sneakers23Web.CartTracker.all_carts())
+    {:noreply, socket}
+  end
+```
+
+At the client, make the change below.
+- in :
+```javascript
+function channelParams() {
+  return {
+    serialized: localStorage.storedCart,
+>>  page: window.location.pathname
+  }
+}
+```
+
+Let's test now.
+
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+iex -S mix phx.server
+
+Enum.each([1, 2], &Sneakers23.Inventory.mark_product_released!/1)
+```
+
+Open two browser tabs to http://localhost:4000 and another tab to http://localhost:4000/admin. Open a tab in incognito mode too, using it to http://localhost:4000. Add and remove several items to each cart. Visit the checkout page from one of these tabs as well.
+
+Without closing the tabs, goto the admin dashboard and open you JavaScript console. Enter window.presence.state and look at the output. You will see the up-to-date Presence data, complete with all our important metadata.
+
+If you open two tabs in the same browser and visit different pages, the presence will track it.
+
+## Assemble the Admin Dashboard
