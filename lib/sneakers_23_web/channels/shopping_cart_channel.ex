@@ -33,7 +33,7 @@ defmodule Sneakers23Web.ShoppingCartChannel do
   end
 
   def handle_info(:update_tracked_cart, socket = %{
-    assigns: %{cart: cart, id: id}
+    assigns: %{cart: cart, cart_id: id}
   }) do
     {:ok, _} = Sneakers23Web.CartTracker.update_cart(
       socket, %{cart: cart, id: id}

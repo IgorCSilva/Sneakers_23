@@ -295,7 +295,7 @@ We will need to track the Channel when it joins.
   end
   
   def handle_info(:update_tracked_cart, socket = %{
-    assigns: %{cart: cart, id: id}
+    assigns: %{cart: cart, cart_id: id}
   }) do
     {:ok, _} = Sneakers23Web.CartTracker.update_cart(
       socket, %{cart: cart, id: id}
@@ -368,3 +368,71 @@ Without closing the tabs, goto the admin dashboard and open you JavaScript conso
 If you open two tabs in the same browser and visit different pages, the presence will track it.
 
 ## Assemble the Admin Dashboard
+
+Copy the file:
+`./index.html.exx \ lib/sneakers_23_web/templates/admin/dashboard/index.html.eex`
+
+Visit the admin page to check if the informations are there.
+`mix phx.server` and visit `http://localhost:4000/admin`
+
+Add the following snippet to the end of admin.js.
+- in assets/js/admin.js:
+```javascript
+presence.onSync(() => {
+  dom.setShopperCount(getShopperCount(presence))
+  dom.assemblePageCounts(getPageCounts(presence))
+
+  const itemCounts = getItemCounts(presence)
+  dom.resetItemCounts()
+  Object.keys(itemCounts).forEach((itemId) => {
+    dom.setItemCount(itemId, itemCounts[itemId])
+  })
+})
+
+function getShopperCount(presence) {
+  return Object.keys(presence.state).length
+}
+
+function getPageCounts(presence) {
+  const pageCounts = {}
+  Object.values(presence.state).forEach(({ metas }) => {
+    metas.forEach(({ page }) => {
+      pageCounts[page] = pageCounts[page] || 0
+      pageCounts[page] += 1
+    })
+  })
+
+  return pageCounts
+}
+
+function getItemCounts(presence) {
+  const itemCounts = {}
+  Object.values(presence.state).forEach(({ metas }) => {
+    metas[0].items.forEach((itemId) => {
+      itemCounts[itemId] = itemCounts[itemId] || 0
+      itemCounts[itemId] += 1
+    })
+  })
+
+  return itemCounts
+}
+```
+
+Let's test now.
+
+```
+mix ecto.reset
+mix run -e "Sneakers23Mock.Seeds.seed!()"
+iex -S mix phx.server
+
+Enum.each([1, 2], &Sneakers23.Inventory.mark_product_released!/1)
+```
+
+Open two browser tabs to http://localhost:4000 and another tab to http://localhost:4000/admin. Open a tab in incognito mode too, using it to http://localhost:4000. Add and remove several items to each cart. Visit the checkout page from one of these tabs as well.
+
+Watch the admin page while you navigate between pages and change the cart.
+
+## Load Test the Admin Dashboard
+
+Copy the folder sneaker_admin_bench to a separate folder.
+Follow the instructions there...
