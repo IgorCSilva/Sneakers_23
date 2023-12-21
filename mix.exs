@@ -46,12 +46,13 @@ defmodule Sneakers23.MixProject do
       {:phoenix_ecto, "~> 4.0"},
       {:ecto_sql, "~> 3.0"},
       {:postgrex, ">= 0.0.0"},
-      {:phoenix_html, "~> 2.11"},
+      {:phoenix_html, "~> 3.3"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:gettext, "~> 0.11"},
       {:jason, "~> 1.0"},
       {:plug_cowboy, "~> 2.5"},
-      {:hound, "~> 1.1.1"}
+      {:hound, "~> 1.1.1"},
+      {:phoenix_live_view, "~> 0.17.3"}
     ]
   end
 

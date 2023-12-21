@@ -24,7 +24,9 @@ config :sneakers_23, Sneakers23Web.Endpoint,
   url: [host: "localhost"],
   secret_key_base: "/pQ3LrKcYNFtUJQ5XQBobICQGWUFohT3O6yuz+76ZuzA2khRwvIBpFJx6BTeFTZ/",
   render_errors: [view: Sneakers23Web.ErrorView, accepts: ~w(html json)],
-  pubsub_server: Sneakers23.PubSub
+  pubsub_server: Sneakers23.PubSub,
+  # run `mix phx.gen.secret 32` to generate a salt.
+  live_view: [signing_salt: "/ajDEEbMUBavA2yTmsZe3dE5xVJ6W35J"]
 
 # Configures Elixir's Logger
 config :logger, :console,
