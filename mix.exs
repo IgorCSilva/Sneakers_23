@@ -52,7 +52,8 @@ defmodule Sneakers23.MixProject do
       {:jason, "~> 1.0"},
       {:plug_cowboy, "~> 2.5"},
       {:hound, "~> 1.1.1"},
-      {:phoenix_live_view, "~> 0.17.3"}
+      {:phoenix_live_view, "~> 0.17.3"},
+      {:floki, ">= 0.0.0", only: :test}
     ]
   end
 
